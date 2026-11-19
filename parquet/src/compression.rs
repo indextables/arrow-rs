@@ -828,6 +828,7 @@ pub use lz4_hadoop_codec::*;
 mod tests {
     use super::*;
 
+    use crate::compression::lz4_codec::LZ4Codec;
     use crate::util::test_common::rand_gen::random_bytes;
 
     fn test_roundtrip(c: CodecType, data: &[u8], uncompress_size: Option<usize>) {
@@ -943,5 +944,118 @@ mod tests {
     #[test]
     fn test_codec_lz4_raw() {
         test_codec_with_size(CodecType::LZ4_RAW);
+    }
+
+    /// A declared size that cannot be allocated: reserving it fails deterministically
+    const UNALLOCATABLE: usize = usize::MAX / 2;
+
+    /// Every codec a page can declare, and whether the LZ4 codec falls back
+    fn page_codecs() -> Vec<(CodecType, bool)> {
+        vec![
+            (CodecType::SNAPPY, false),
+            (CodecType::GZIP(Default::default()), false),
+            (CodecType::BROTLI(Default::default()), false),
+            (CodecType::LZ4, false),
+            (CodecType::LZ4, true),
+            (CodecType::ZSTD(Default::default()), false),
+            (CodecType::LZ4_RAW, false),
+        ]
+    }
+
+    fn page_codec(c: CodecType, backward_compatible_lz4: bool) -> Box<dyn Codec> {
+        let options = CodecOptionsBuilder::default()
+            .set_backward_compatible_lz4(backward_compatible_lz4)
+            .build();
+        create_codec(c, &options).unwrap().unwrap()
+    }
+
+    fn compress_with(c: CodecType, data: &[u8]) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        page_codec(c, false).compress(data, &mut compressed).unwrap();
+        compressed
+    }
+
+    /// A page declaring an uncompressed size that cannot be allocated fails to decompress, or
+    /// for a codec that grows its output as it decompresses yields just the stream's bytes; it
+    /// never aborts the process
+    #[test]
+    fn test_decompress_unallocatable_declared_size() {
+        for (c, backward_compatible_lz4) in page_codecs() {
+            let compressed = compress_with(c, b"parquet");
+            let mut out = Vec::new();
+            let result = page_codec(c, backward_compatible_lz4).decompress(
+                &compressed,
+                &mut out,
+                Some(UNALLOCATABLE),
+            );
+            if let Ok(n) = result {
+                assert_eq!(n, 7, "{c:?}");
+                assert_eq!(out, b"parquet", "{c:?}");
+            }
+        }
+    }
+
+    /// The same for the LZ4 frame codec the LZ4 codec falls back to
+    #[test]
+    fn test_decompress_lz4_frame_unallocatable_declared_size() {
+        let mut compressed = Vec::new();
+        LZ4Codec::new().compress(b"parquet", &mut compressed).unwrap();
+        let mut out = Vec::new();
+        let n = LZ4Codec::new()
+            .decompress(&compressed, &mut out, Some(UNALLOCATABLE))
+            .unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(out, b"parquet");
+    }
+
+    /// A stream holding more bytes than the page declares fails, and is not decompressed
+    /// much beyond the declared size
+    #[test]
+    fn test_decompress_output_exceeds_declared_size() {
+        let data = vec![0_u8; 1 << 20];
+        for (c, backward_compatible_lz4) in page_codecs() {
+            let compressed = compress_with(c, &data);
+            let mut out = Vec::new();
+            let result =
+                page_codec(c, backward_compatible_lz4).decompress(&compressed, &mut out, Some(1024));
+            assert!(result.is_err(), "{c:?}: {result:?}");
+            assert!(out.len() <= 1025, "{c:?}: {} bytes", out.len());
+        }
+
+        let mut compressed = Vec::new();
+        LZ4Codec::new().compress(&data, &mut compressed).unwrap();
+        let mut out = Vec::new();
+        let result = LZ4Codec::new().decompress(&compressed, &mut out, Some(1024));
+        assert!(result.is_err(), "{result:?}");
+        assert!(out.len() <= 1025, "{} bytes", out.len());
+    }
+
+    /// A SNAPPY page declaring more bytes than its stream holds fails before the declared
+    /// size is allocated, rather than yielding the stream padded with zeros
+    #[test]
+    fn test_decompress_snappy_declared_size_exceeds_stream() {
+        let compressed = compress_with(CodecType::SNAPPY, b"parquet");
+        for declared in [8, 1 << 30] {
+            let mut out = Vec::new();
+            let result =
+                page_codec(CodecType::SNAPPY, false).decompress(&compressed, &mut out, Some(declared));
+            assert!(result.is_err(), "{declared}: {result:?}");
+            assert!(out.capacity() < 1 << 20, "{declared}: {}", out.capacity());
+        }
+    }
+
+    /// A ZSTD frame header declaring a content size that cannot be allocated fails when the
+    /// page gives no size
+    #[test]
+    fn test_decompress_zstd_unallocatable_frame_content_size() {
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0xE0];
+        frame.extend_from_slice(&(1_u64 << 62).to_le_bytes());
+        let mut out = Vec::new();
+        let result = page_codec(CodecType::ZSTD(Default::default()), false).decompress(
+            &frame,
+            &mut out,
+            None,
+        );
+        assert!(result.is_err(), "{result:?}");
     }
 }
