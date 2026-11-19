@@ -39,6 +39,7 @@ use crate::parquet_thrift::{ReadThrift, ThriftReadInputProtocol};
 use crate::record::Row;
 use crate::record::reader::RowIter;
 use crate::schema::types::{SchemaDescPtr, Type as SchemaType};
+use crate::util::try_reserve_exact;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::{fs::File, io::Read, path::Path, sync::Arc};
@@ -444,7 +445,8 @@ pub(crate) fn decode_page(
                 return Err(general_err!("Invalid page header"));
             }
             let decompressed_size = uncompressed_page_size - offset;
-            let mut decompressed = Vec::with_capacity(uncompressed_page_size);
+            let mut decompressed = Vec::new();
+            try_reserve_exact(&mut decompressed, uncompressed_page_size, "page bytes")?;
             decompressed.extend_from_slice(&buffer[..offset]);
             // decompressed size of zero corresponds to a page with no non-null values
             // see https://github.com/apache/parquet-format/blob/master/README.md#data-pages

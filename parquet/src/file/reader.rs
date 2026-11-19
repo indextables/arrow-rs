@@ -32,6 +32,7 @@ use crate::file::metadata::*;
 pub use crate::file::serialized_reader::{SerializedFileReader, SerializedPageReader};
 use crate::record::reader::RowIter;
 use crate::schema::types::Type as SchemaType;
+use crate::util::try_reserve_exact;
 
 use crate::basic::Type;
 
@@ -97,7 +98,8 @@ impl ChunkReader for File {
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes> {
-        let mut buffer = Vec::with_capacity(length);
+        let mut buffer = Vec::new();
+        try_reserve_exact(&mut buffer, length, "bytes to read")?;
         let mut reader = self.try_clone()?;
         reader.seek(SeekFrom::Start(start))?;
         let read = reader.take(length as _).read_to_end(&mut buffer)?;
