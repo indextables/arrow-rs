@@ -1210,14 +1210,17 @@ mod tests {
     };
     use crate::file::properties::{EnabledStatistics, WriterProperties};
 
+    use crate::basic::Compression;
     use crate::basic::{self, BoundaryOrder, ColumnOrder, Encoding, SortOrder};
     use crate::column::reader::ColumnReader;
     use crate::data_type::private::ParquetValueType;
     use crate::data_type::{AsBytes, FixedLenByteArrayType, Int32Type};
-    use crate::file::metadata::thrift::DataPageHeaderV2;
+    use crate::file::metadata::thrift::{DataPageHeader, DataPageHeaderV2, DictionaryPageHeader};
     use crate::file::writer::SerializedFileWriter;
+    use crate::parquet_thrift::{ThriftCompactOutputProtocol, WriteThrift};
     use crate::record::RowAccessor;
     use crate::schema::parser::parse_message_type;
+    use crate::schema::types::SchemaDescriptor;
     use crate::util::test_common::file_util::{get_test_file, get_test_path};
 
     use super::*;
@@ -1250,6 +1253,147 @@ mod tests {
             err.to_string()
                 .contains("DataPage v2 header contains implausible values")
         );
+    }
+
+    /// A SNAPPY page body of 15 bytes: a page declaring a 1 GiB uncompressed size for it is
+    /// 36 bytes in all
+    fn small_snappy_body() -> Vec<u8> {
+        let mut codec = create_codec(Compression::SNAPPY, &Default::default())
+            .unwrap()
+            .unwrap();
+        let mut body = Vec::new();
+        codec
+            .compress(
+                b"\x80\x01\x01\x80\x80\x80\x80\x80\x80\x80\x80\x10",
+                &mut body,
+            )
+            .unwrap();
+        body
+    }
+
+    /// A header for a page holding one value, with a 1 GiB uncompressed size for a body of
+    /// `compressed_page_size` bytes: a v1 or v2 data page (the v2 page with two bytes of
+    /// uncompressed levels) or a dictionary page
+    fn oversized_page_header(r#type: PageType, compressed_page_size: i32) -> PageHeader {
+        PageHeader {
+            r#type,
+            uncompressed_page_size: 1 << 30,
+            compressed_page_size,
+            crc: None,
+            data_page_header: (r#type == PageType::DATA_PAGE).then(|| DataPageHeader {
+                num_values: 1,
+                encoding: Encoding::DELTA_LENGTH_BYTE_ARRAY,
+                definition_level_encoding: Encoding::RLE,
+                repetition_level_encoding: Encoding::RLE,
+                statistics: None,
+            }),
+            index_page_header: None,
+            dictionary_page_header: (r#type == PageType::DICTIONARY_PAGE).then(|| {
+                DictionaryPageHeader {
+                    num_values: 1,
+                    encoding: Encoding::PLAIN,
+                    is_sorted: None,
+                }
+            }),
+            data_page_header_v2: (r#type == PageType::DATA_PAGE_V2).then(|| DataPageHeaderV2 {
+                num_values: 1,
+                num_nulls: 0,
+                num_rows: 1,
+                encoding: Encoding::DELTA_LENGTH_BYTE_ARRAY,
+                definition_levels_byte_length: 1,
+                repetition_levels_byte_length: 1,
+                is_compressed: None,
+                statistics: None,
+            }),
+        }
+    }
+
+    /// The page's body: for a v2 page, its two bytes of levels and the SNAPPY body
+    fn oversized_page_body(r#type: PageType) -> Vec<u8> {
+        let mut body = Vec::new();
+        if r#type == PageType::DATA_PAGE_V2 {
+            body.extend_from_slice(&[0, 0]);
+        }
+        body.extend_from_slice(&small_snappy_body());
+        body
+    }
+
+    const OVERSIZED_PAGE_TYPES: [PageType; 3] = [
+        PageType::DATA_PAGE,
+        PageType::DATA_PAGE_V2,
+        PageType::DICTIONARY_PAGE,
+    ];
+
+    /// A SNAPPY page declaring a 1 GiB uncompressed size for a 15-byte body fails to decode
+    /// rather than allocating the declared size
+    #[test]
+    fn test_decode_page_uncompressed_size_exceeds_body() {
+        for r#type in OVERSIZED_PAGE_TYPES {
+            let body = oversized_page_body(r#type);
+            let header = oversized_page_header(r#type, body.len() as i32);
+            let mut codec = create_codec(Compression::SNAPPY, &Default::default())
+                .unwrap()
+                .unwrap();
+            let result = decode_page(header, body.into(), Type::BYTE_ARRAY, Some(&mut codec));
+            assert!(result.is_err(), "{type:?}");
+        }
+    }
+
+    /// A column chunk of `string_col` holding just the oversized page, and that chunk's
+    /// metadata
+    fn oversized_page_chunk(r#type: PageType) -> (Bytes, ColumnChunkMetaData) {
+        let body = oversized_page_body(r#type);
+        let header = oversized_page_header(r#type, body.len() as i32);
+        let mut chunk = Vec::new();
+        header
+            .write_thrift(&mut ThriftCompactOutputProtocol::new(&mut chunk))
+            .unwrap();
+        chunk.extend_from_slice(&body);
+
+        let schema = parse_message_type("message m { required binary string_col; }").unwrap();
+        let schema = SchemaDescriptor::new(Arc::new(schema));
+        let mut builder = ColumnChunkMetaData::builder(schema.column(0))
+            .set_compression(Compression::SNAPPY)
+            .set_num_values(1)
+            .set_total_compressed_size(chunk.len() as i64)
+            .set_total_uncompressed_size(chunk.len() as i64);
+        builder = if r#type == PageType::DICTIONARY_PAGE {
+            builder.set_dictionary_page_offset(Some(0))
+        } else {
+            builder.set_data_page_offset(0)
+        };
+        (chunk.into(), builder.build().unwrap())
+    }
+
+    /// Reading the oversized page through a page reader, held in memory or in a file and
+    /// with or without the offset index, fails rather than allocating the declared size
+    #[test]
+    fn test_page_reader_uncompressed_size_exceeds_body() {
+        for r#type in OVERSIZED_PAGE_TYPES {
+            let (chunk, meta) = oversized_page_chunk(r#type);
+            let mut file = tempfile::tempfile().unwrap();
+            std::io::Write::write_all(&mut file, &chunk).unwrap();
+            let file = Arc::new(file);
+            for page_index in [false, true] {
+                let locations = (page_index && r#type != PageType::DICTIONARY_PAGE).then(|| {
+                    vec![PageLocation {
+                        offset: 0,
+                        compressed_page_size: chunk.len() as i32,
+                        first_row_index: 0,
+                    }]
+                });
+                let mut in_memory =
+                    SerializedPageReader::new(Arc::new(chunk.clone()), &meta, 1, locations.clone())
+                        .unwrap();
+                let result = in_memory.get_next_page();
+                assert!(result.is_err(), "{type:?} {page_index}: {result:?}");
+
+                let mut in_file =
+                    SerializedPageReader::new(Arc::clone(&file), &meta, 1, locations).unwrap();
+                let result = in_file.get_next_page();
+                assert!(result.is_err(), "{type:?} {page_index}: {result:?}");
+            }
+        }
     }
 
     #[test]

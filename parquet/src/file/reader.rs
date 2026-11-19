@@ -318,4 +318,14 @@ mod tests {
             "EOF: Expected to read 3 bytes at offset 2, while file has length 4"
         );
     }
+
+    /// Reading a page body whose declared length cannot be allocated from a file fails
+    /// rather than aborting the process
+    #[test]
+    fn test_file_chunk_reader_get_bytes_unallocatable() {
+        let mut file = tempfile::tempfile().unwrap();
+        std::io::Write::write_all(&mut file, &[0, 1, 2, 3]).unwrap();
+        assert!(file.get_bytes(0, usize::MAX / 2).is_err());
+        assert_eq!(file.get_bytes(1, 2).unwrap().as_ref(), &[1, 2]);
+    }
 }
