@@ -1250,6 +1250,76 @@ pub(crate) mod tests {
         );
     }
 
+    /// A boolean inside a list, set or map is one byte in the compact protocol (unlike a
+    /// boolean struct field, whose value its field type carries), so skipping one consumes it.
+    #[test]
+    fn test_skip_bool_collection_elements_consume_their_bytes() {
+        // list of 3 booleans, then a trailing byte
+        let data = [0x32, 0x01, 0x00, 0x01, 0xAA];
+        let mut prot = ThriftSliceInputProtocol::new(&data);
+        prot.skip(FieldType::List).unwrap();
+        assert_eq!(prot.as_slice(), &[0xAA]);
+
+        // set of 2 booleans
+        let data = [0x2A, 0x01, 0x02, 0xAA];
+        let mut prot = ThriftSliceInputProtocol::new(&data);
+        prot.skip(FieldType::Set).unwrap();
+        assert_eq!(prot.as_slice(), &[0xAA]);
+
+        // map of 2 entries, boolean keys and values
+        let data = [0x02, 0x22, 0x01, 0x02, 0x02, 0x01, 0xAA];
+        let mut prot = ThriftSliceInputProtocol::new(&data);
+        prot.skip(FieldType::Map).unwrap();
+        assert_eq!(prot.as_slice(), &[0xAA]);
+    }
+
+    #[test]
+    fn test_skip_bool_list_without_payload_returns_err() {
+        // list of 4 booleans with no element bytes
+        let data = [0x42];
+        let mut prot = ThriftSliceInputProtocol::new(&data);
+        let result = prot.skip(FieldType::List);
+        assert!(result.is_err(), "expected error, got {result:?}");
+    }
+
+    /// A skipped collection declaring more elements than the remaining input could hold fails.
+    #[test]
+    fn test_skip_collection_size_exceeds_remaining_returns_err() {
+        // list of i32::MAX booleans, with two bytes of input left
+        let data = [0xF2, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0x01, 0x00];
+        let mut prot = ThriftSliceInputProtocol::new(&data);
+        assert!(prot.skip(FieldType::List).is_err());
+
+        // map of i32::MAX boolean -> boolean entries, with two bytes of input left
+        let data = [0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0x22, 0x01, 0x00];
+        let mut prot = ThriftSliceInputProtocol::new(&data);
+        assert!(prot.skip(FieldType::Map).is_err());
+    }
+
+    /// A page header whose unknown field holds 1,024 lists each declaring i32::MAX booleans and
+    /// carrying no elements (about 6 KiB) fails promptly when read from a stream, rather than
+    /// skipping 2^41 elements that occupy no bytes.
+    #[test]
+    fn test_page_header_unknown_bool_lists_fail_promptly() {
+        use crate::file::metadata::thrift::PageHeader;
+        // field id 100 (long form), type list; list of 1,024 lists
+        let mut data = vec![0x09, 0xC8, 0x01, 0xF9, 0x80, 0x08];
+        for _ in 0..1024 {
+            // list of i32::MAX booleans, no elements
+            data.extend_from_slice(&[0xF2, 0xFF, 0xFF, 0xFF, 0xFF, 0x07]);
+        }
+        data.push(0x00);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut prot = ThriftReadInputProtocol::new(std::io::Cursor::new(data));
+            let _ = tx.send(PageHeader::read_thrift(&mut prot).is_err());
+        });
+        let failed = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading the page header did not finish within 10 seconds");
+        assert!(failed, "the malformed page header must fail");
+    }
+
     #[test]
     fn test_read_thrift_vec_huge_declared_size_returns_err() {
         // Compact list header: 0xF5 = I32 elements, size follows as a varint.
