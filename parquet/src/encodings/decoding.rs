@@ -696,6 +696,21 @@ where
     }
 }
 
+/// Resizes `lengths` to `len` values, zeroing new ones, for a length, prefix length or suffix
+/// length stream declaring `len` values.
+///
+/// The count is read from the page, so a count that cannot be allocated returns an error
+/// rather than aborting the process.
+pub(crate) fn try_resize_lengths(lengths: &mut Vec<i32>, len: usize) -> Result<()> {
+    if let Some(additional) = len.checked_sub(lengths.len()) {
+        lengths
+            .try_reserve_exact(additional)
+            .map_err(|e| general_err!("cannot allocate {} delta lengths: {}", len, e))?;
+    }
+    lengths.resize(len, 0);
+    Ok(())
+}
+
 impl<T: DataType> Decoder<T> for DeltaBitPackDecoder<T>
 where
     T::T: Default + FromPrimitive + FromBitpacked + WrappingAdd + Copy,
@@ -1020,7 +1035,7 @@ impl<T: DataType> Decoder<T> for DeltaLengthByteArrayDecoder<T> {
                 let mut len_decoder = DeltaBitPackDecoder::<Int32Type>::new();
                 len_decoder.set_data(data.clone(), num_values)?;
                 let num_lengths = len_decoder.checked_values_left(num_values)?;
-                self.lengths.resize(num_lengths, 0);
+                try_resize_lengths(&mut self.lengths, num_lengths)?;
                 len_decoder.get(&mut self.lengths[..])?;
 
                 self.data = Some(data.slice(len_decoder.get_offset()..));
@@ -1151,7 +1166,7 @@ impl<T: DataType> Decoder<T> for DeltaByteArrayDecoder<T> {
                 let mut prefix_len_decoder = DeltaBitPackDecoder::<Int32Type>::new();
                 prefix_len_decoder.set_data(data.clone(), num_values)?;
                 let num_prefixes = prefix_len_decoder.checked_values_left(num_values)?;
-                self.prefix_lengths.resize(num_prefixes, 0);
+                try_resize_lengths(&mut self.prefix_lengths, num_prefixes)?;
                 prefix_len_decoder.get(&mut self.prefix_lengths[..])?;
 
                 let mut suffix_decoder = DeltaLengthByteArrayDecoder::new();

@@ -24,7 +24,7 @@ use crate::basic::{ConvertedType, Encoding};
 use crate::column::page::PageIterator;
 use crate::column::reader::decoder::ColumnValueDecoder;
 use crate::data_type::Int32Type;
-use crate::encodings::decoding::{Decoder, DeltaBitPackDecoder};
+use crate::encodings::decoding::{Decoder, DeltaBitPackDecoder, try_resize_lengths};
 use crate::errors::{ParquetError, Result};
 use crate::schema::types::ColumnDescPtr;
 use crate::util::utf8::check_valid_utf8;
@@ -589,7 +589,8 @@ impl ByteViewArrayDecoderDeltaLength {
         len_decoder.set_data(data.clone(), num_values)?;
         let values = len_decoder.checked_values_left(num_values)?;
 
-        let mut lengths = vec![0; values];
+        let mut lengths = Vec::new();
+        try_resize_lengths(&mut lengths, values)?;
         len_decoder.get(&mut lengths)?;
 
         let mut total_bytes = 0;

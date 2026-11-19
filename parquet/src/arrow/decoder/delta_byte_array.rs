@@ -18,7 +18,7 @@
 use bytes::Bytes;
 
 use crate::data_type::Int32Type;
-use crate::encodings::decoding::{Decoder, DeltaBitPackDecoder};
+use crate::encodings::decoding::{Decoder, DeltaBitPackDecoder, try_resize_lengths};
 use crate::errors::{ParquetError, Result};
 
 /// Decoder for `Encoding::DELTA_BYTE_ARRAY`
@@ -39,14 +39,16 @@ impl DeltaByteArrayDecoder {
         prefix.set_data(data.clone(), num_values)?;
 
         let num_prefix = prefix.checked_values_left(num_values)?;
-        let mut prefix_lengths = vec![0; num_prefix];
+        let mut prefix_lengths = Vec::new();
+        try_resize_lengths(&mut prefix_lengths, num_prefix)?;
         assert_eq!(prefix.get(&mut prefix_lengths)?, num_prefix);
 
         let mut suffix = DeltaBitPackDecoder::<Int32Type>::new();
         suffix.set_data(data.slice(prefix.get_offset()..), num_values)?;
 
         let num_suffix = suffix.checked_values_left(num_values)?;
-        let mut suffix_lengths = vec![0; num_suffix];
+        let mut suffix_lengths = Vec::new();
+        try_resize_lengths(&mut suffix_lengths, num_suffix)?;
         assert_eq!(suffix.get(&mut suffix_lengths)?, num_suffix);
 
         if num_prefix != num_suffix {
