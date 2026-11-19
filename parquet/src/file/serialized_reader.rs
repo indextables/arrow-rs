@@ -2548,6 +2548,81 @@ mod tests {
         assert_eq!(vec.len(), 352);
     }
 
+    /// Reads every page of `string_col` in `alltypes_tiny_pages.parquet` (a dictionary page
+    /// and 352 data pages holding 7,300 values) through a page reader whose column chunk
+    /// metadata records `num_values` values, with or without the offset index; returns the
+    /// number of pages read before the first error, and that error
+    fn read_tiny_pages_with_num_values(num_values: i64, page_index: bool) -> (usize, Result<()>) {
+        let options = ReadOptionsBuilder::new();
+        let options = if page_index {
+            options.with_page_index()
+        } else {
+            options
+        }
+        .build();
+        let reader = SerializedFileReader::new_with_options(
+            get_test_file("alltypes_tiny_pages.parquet"),
+            options,
+        )
+        .unwrap();
+        let row_group = reader.metadata().row_group(0);
+        let column = row_group
+            .column(9)
+            .clone()
+            .into_builder()
+            .set_num_values(num_values)
+            .build()
+            .unwrap();
+        let page_locations = reader
+            .metadata()
+            .offset_index()
+            .map(|index| index[0][9].page_locations.clone());
+        let mut page_reader = SerializedPageReader::new(
+            Arc::clone(&reader.chunk_reader),
+            &column,
+            row_group.num_rows() as usize,
+            page_locations,
+        )
+        .unwrap();
+        let mut pages = 0;
+        loop {
+            match page_reader.get_next_page() {
+                Ok(Some(_)) => pages += 1,
+                Ok(None) => return (pages, Ok(())),
+                Err(e) => return (pages, Err(e)),
+            }
+        }
+    }
+
+    /// A data page declaring more values than its column chunk has left is refused before it
+    /// is decoded; the dictionary page is not counted
+    #[test]
+    fn test_data_page_values_exceed_column_chunk_values() {
+        for page_index in [false, true] {
+            let (pages, result) = read_tiny_pages_with_num_values(7300, page_index);
+            result.unwrap();
+            assert_eq!(pages, 353);
+
+            // The last data page holds 10 values
+            let (pages, result) = read_tiny_pages_with_num_values(7299, page_index);
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("exceeds the column chunk's remaining"),
+                "{err}"
+            );
+            assert_eq!(pages, 352, "page_index: {page_index}");
+
+            // Only the dictionary page is read
+            let (pages, result) = read_tiny_pages_with_num_values(0, page_index);
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("exceeds the column chunk's remaining"),
+                "{err}"
+            );
+            assert_eq!(pages, 1, "page_index: {page_index}");
+        }
+    }
+
     #[test]
     fn test_peek_page_with_dictionary_page_without_offset_index() {
         let test_file = get_test_file("alltypes_tiny_pages.parquet");
