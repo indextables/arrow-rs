@@ -1378,6 +1378,43 @@ mod tests {
         }
     }
 
+    /// Returns a DELTA_BINARY_PACKED stream declaring 2^62 values in one block of one mini
+    /// block of bit width zero
+    #[cfg(target_pointer_width = "64")]
+    fn unallocatable_delta_stream() -> Bytes {
+        let mut writer = BitWriter::new(32);
+        writer.put_vlq_int(1 << 62); // block size
+        writer.put_vlq_int(1); // mini blocks per block
+        writer.put_vlq_int(1 << 62); // values
+        writer.put_zigzag_vlq_int(0); // first value
+        writer.put_zigzag_vlq_int(0); // min delta
+        writer.put_vlq_int(0); // bit width of the one mini block
+        writer.consume().into()
+    }
+
+    /// A count within the page's value count and the stream's bytes, but too large to
+    /// allocate, fails with an error rather than a panic or abort
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_delta_length_count_unallocatable() {
+        let mut zeros = get_encoder::<Int32Type>(
+            Encoding::DELTA_BINARY_PACKED,
+            &create_test_col_desc_ptr(-1, Type::INT32),
+        )
+        .unwrap();
+        zeros.put(&[0; 4]).unwrap();
+        let zeros = zeros.flush_buffer().unwrap();
+
+        let declaring = unallocatable_delta_stream();
+        for err in delta_set_data_errors(declaring.clone(), usize::MAX, true) {
+            assert!(err.contains("cannot allocate"), "{err}");
+        }
+        let suffix: Bytes = [zeros, declaring].concat().into();
+        for err in delta_set_data_errors(suffix, usize::MAX, false) {
+            assert!(err.contains("cannot allocate"), "{err}");
+        }
+    }
+
     #[test]
     fn test_delta_byte_array_negative_prefix_len_returns_error() {
         let col_descr = create_test_col_desc_ptr(-1, Type::BYTE_ARRAY);

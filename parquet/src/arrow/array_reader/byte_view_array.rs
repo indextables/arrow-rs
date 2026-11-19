@@ -840,6 +840,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_byte_view_array_decoder_unallocatable_delta_lengths() {
+        let column_desc = utf8_column();
+
+        // A count within the page's value count and the stream's bytes, but too large to
+        // allocate, fails with an error rather than a panic or abort
+        for (encoding, page) in crate::arrow::array_reader::test_util::delta_pages_unallocatable() {
+            let mut decoder = ByteViewArrayColumnValueDecoder::new(&column_desc);
+            let err = decoder
+                .set_data(encoding, page, usize::MAX, None)
+                .unwrap_err();
+            assert!(err.to_string().contains("cannot allocate"), "{err}");
+        }
+    }
+
+    #[test]
     fn test_byte_array_string_view_decoder() {
         let (pages, encoded_dictionary) =
             byte_array_all_encodings(vec!["hello", "world", "large payload over 12 bytes", "b"]);

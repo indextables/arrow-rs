@@ -653,6 +653,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_delta_byte_array_unallocatable_lengths() {
+        let t = SchemaType::primitive_type_builder("col", PhysicalType::FIXED_LEN_BYTE_ARRAY)
+            .with_length(2)
+            .build()
+            .unwrap();
+        let column_desc: ColumnDescPtr = Arc::new(ColumnDescriptor::new(
+            Arc::new(t),
+            1,
+            0,
+            ColumnPath::new(vec![]),
+        ));
+
+        // A count within the page's value count and the stream's bytes, but too large to
+        // allocate, fails with an error rather than a panic or abort
+        for (encoding, page) in crate::arrow::array_reader::test_util::delta_pages_unallocatable() {
+            if encoding != Encoding::DELTA_BYTE_ARRAY {
+                continue;
+            }
+            let mut decoder = ValueDecoder::new(&column_desc);
+            let err = decoder
+                .set_data(encoding, page, usize::MAX, None)
+                .unwrap_err();
+            assert!(err.to_string().contains("cannot allocate"), "{err}");
+        }
+    }
+
+    #[test]
     fn test_delta_byte_array_round_trip() {
         let values = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
             (0..1000_u16).map(|i| (i % 7 != 0).then(|| (i / 3).to_be_bytes())),

@@ -632,6 +632,8 @@ impl ByteArrayDecoderDictionary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_pointer_width = "64")]
+    use crate::arrow::array_reader::test_util::delta_pages_unallocatable;
     use crate::arrow::array_reader::test_util::{
         byte_array_all_encodings, delta_pages_declaring, encode_byte_array, utf8_column,
     };
@@ -743,6 +745,22 @@ mod tests {
             assert_eq!(decoder.read(&mut output, 6).unwrap(), 4);
             assert_eq!(output.values.as_slice(), "helloworldab".as_bytes());
             assert_eq!(output.offsets.as_slice(), &[0, 5, 10, 11, 12]);
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_byte_array_decoder_unallocatable_delta_lengths() {
+        let column_desc = utf8_column();
+
+        // A count within the page's value count and the stream's bytes, but too large to
+        // allocate, fails with an error rather than a panic or abort
+        for (encoding, page) in delta_pages_unallocatable() {
+            let mut decoder = ByteArrayColumnValueDecoder::<i32>::new(&column_desc);
+            let err = decoder
+                .set_data(encoding, page, usize::MAX, None)
+                .unwrap_err();
+            assert!(err.to_string().contains("cannot allocate"), "{err}");
         }
     }
 

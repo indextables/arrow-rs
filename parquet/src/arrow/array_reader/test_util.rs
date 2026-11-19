@@ -74,6 +74,44 @@ pub fn delta_pages_declaring(count: u64, num_values: usize) -> Vec<(Encoding, By
     ]
 }
 
+/// Returns `DELTA_LENGTH_BYTE_ARRAY` and `DELTA_BYTE_ARRAY` data whose length stream
+/// declares 2^62 values in one block of one mini block of bit width zero: a count its
+/// bytes could encode, sizing a vector that cannot be allocated
+///
+/// The `DELTA_BYTE_ARRAY` data is returned twice, as in [`delta_pages_declaring`]
+#[cfg(target_pointer_width = "64")]
+pub fn delta_pages_unallocatable() -> Vec<(Encoding, Bytes)> {
+    let declaring = unallocatable_delta_stream();
+
+    let mut lengths =
+        get_encoder::<Int32Type>(Encoding::DELTA_BINARY_PACKED, &int32_column()).unwrap();
+    lengths.put(&[0; 4]).unwrap();
+    let lengths = lengths.flush_buffer().unwrap();
+
+    vec![
+        (Encoding::DELTA_LENGTH_BYTE_ARRAY, declaring.clone()),
+        (Encoding::DELTA_BYTE_ARRAY, declaring.clone()),
+        (
+            Encoding::DELTA_BYTE_ARRAY,
+            [lengths, declaring].concat().into(),
+        ),
+    ]
+}
+
+/// Returns a `DELTA_BINARY_PACKED` stream declaring 2^62 values in one block of one mini
+/// block of bit width zero
+#[cfg(target_pointer_width = "64")]
+pub fn unallocatable_delta_stream() -> Bytes {
+    let mut writer = BitWriter::new(32);
+    writer.put_vlq_int(1 << 62); // block size
+    writer.put_vlq_int(1); // mini blocks per block
+    writer.put_vlq_int(1 << 62); // values
+    writer.put_zigzag_vlq_int(0); // first value
+    writer.put_zigzag_vlq_int(0); // min delta
+    writer.put_vlq_int(0); // bit width of the one mini block
+    writer.consume().into()
+}
+
 /// Returns a `DELTA_BINARY_PACKED` header declaring `count` values, with no blocks
 fn delta_binary_packed_header(count: u64) -> Bytes {
     let mut writer = BitWriter::new(32);
