@@ -574,6 +574,9 @@ pub struct SerializedPageReader<R: ChunkReader> {
 
     state: SerializedPageReaderState,
 
+    /// The values of the column chunk, from its metadata, not yet read in data pages
+    remaining_values: u64,
+
     context: SerializedPageReaderContext,
 }
 
@@ -675,6 +678,7 @@ impl<R: ChunkReader> SerializedPageReader<R> {
             reader,
             decompressor,
             state,
+            remaining_values: u64::try_from(meta.num_values()).unwrap_or(0),
             physical_type: meta.column_type(),
             context,
         })
@@ -897,6 +901,31 @@ fn verify_page_header_len(header_len: usize, remaining_bytes: u64) -> Result<()>
     Ok(())
 }
 
+/// Refuses a data page declaring more values than its column chunk has left, then counts its
+/// values as read.
+///
+/// A data page's value count sizes the buffers its decoders allocate, while readers size their
+/// memory from the column chunk's value count, so a page may not declare more. Dictionary and
+/// index pages are not counted.
+fn take_data_page_values(header: &PageHeader, remaining_values: &mut u64) -> Result<()> {
+    let num_values = match header.r#type {
+        PageType::DATA_PAGE => header.data_page_header.as_ref().map(|h| h.num_values),
+        PageType::DATA_PAGE_V2 => header.data_page_header_v2.as_ref().map(|h| h.num_values),
+        _ => None,
+    };
+    // A negative count is refused when the page is decoded
+    let num_values = num_values.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
+    if num_values > *remaining_values {
+        return Err(general_err!(
+            "Data page declares {} values, which exceeds the column chunk's remaining {} values",
+            num_values,
+            remaining_values
+        ));
+    }
+    *remaining_values -= num_values;
+    Ok(())
+}
+
 fn verify_page_size(
     compressed_size: i32,
     uncompressed_size: i32,
@@ -954,6 +983,7 @@ impl<R: ChunkReader> PageReader for SerializedPageReader<R> {
                     if header.r#type == PageType::INDEX_PAGE {
                         continue;
                     }
+                    take_data_page_values(&header, &mut self.remaining_values)?;
 
                     let buffer = self.reader.get_bytes(data_start, data_len)?;
 
@@ -997,6 +1027,7 @@ impl<R: ChunkReader> PageReader for SerializedPageReader<R> {
                         *page_index,
                         is_dictionary_page,
                     )?;
+                    take_data_page_values(&header, &mut self.remaining_values)?;
                     let bytes = buffer.slice(offset..);
                     let bytes =
                         self.context
