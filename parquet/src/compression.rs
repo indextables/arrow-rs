@@ -61,9 +61,10 @@ pub trait Codec: Send {
 
     /// Decompresses data stored in slice `input_buf` and appends output to `output_buf`.
     ///
-    /// If the uncompress_size is provided it will allocate the exact amount of memory.
-    /// Otherwise, it will estimate the uncompressed size, allocating an amount of memory
-    /// greater or equal to the real uncompress_size.
+    /// If the uncompress_size is provided it will allocate the exact amount of memory, and
+    /// returns an error if the input holds more than uncompress_size bytes or the memory
+    /// cannot be allocated. Otherwise, it will estimate the uncompressed size, allocating an
+    /// amount of memory greater or equal to the real uncompress_size.
     ///
     /// Returns the total number of bytes written.
     fn decompress(
@@ -196,12 +197,34 @@ pub fn create_codec(codec: CodecType, _options: &CodecOptions) -> Result<Option<
     }
 }
 
+/// Reads `decoder` to its end, appending to `output_buf`, for a page declaring `size`
+/// uncompressed bytes: stops after one byte more and returns an error, so that a stream
+/// holding more than the page declares is not decompressed in full.
+#[cfg(any(feature = "flate2", feature = "brotli", test))]
+fn read_to_end_within(
+    decoder: impl std::io::Read,
+    output_buf: &mut Vec<u8>,
+    size: usize,
+) -> Result<usize> {
+    use std::io::Read;
+    let limit = u64::try_from(size).unwrap_or(u64::MAX).saturating_add(1);
+    let n = decoder.take(limit).read_to_end(output_buf)?;
+    if n > size {
+        return Err(general_err!(
+            "Compressed stream holds more than the {} bytes expected",
+            size
+        ));
+    }
+    Ok(n)
+}
+
 #[cfg(any(feature = "snap", test))]
 mod snappy_codec {
     use snap::raw::{Decoder, Encoder, decompress_len, max_compress_len};
 
     use crate::compression::Codec;
-    use crate::errors::Result;
+    use crate::errors::{ParquetError, Result};
+    use crate::util::try_reserve_exact;
 
     /// Codec for Snappy compression format.
     pub struct SnappyCodec {
@@ -226,11 +249,20 @@ mod snappy_codec {
             output_buf: &mut Vec<u8>,
             uncompress_size: Option<usize>,
         ) -> Result<usize> {
-            let len = match uncompress_size {
-                Some(size) => size,
-                None => decompress_len(input_buf)?,
-            };
+            let len = decompress_len(input_buf)?;
+            // The stream records its decompressed length: check it against the size given
+            // before allocating that size
+            if let Some(size) = uncompress_size {
+                if size != len {
+                    return Err(general_err!(
+                        "Snappy stream holds {} bytes, expected {}",
+                        len,
+                        size
+                    ));
+                }
+            }
             let offset = output_buf.len();
+            try_reserve_exact(output_buf, len, "bytes to decompress into")?;
             output_buf.resize(offset + len, 0);
             self.decoder
                 .decompress(input_buf, &mut output_buf[offset..])
@@ -259,7 +291,7 @@ mod gzip_codec {
 
     use flate2::{Compression, read, write};
 
-    use crate::compression::Codec;
+    use crate::compression::{Codec, read_to_end_within};
     use crate::errors::Result;
 
     use super::GzipLevel;
@@ -281,10 +313,13 @@ mod gzip_codec {
             &mut self,
             input_buf: &[u8],
             output_buf: &mut Vec<u8>,
-            _uncompress_size: Option<usize>,
+            uncompress_size: Option<usize>,
         ) -> Result<usize> {
             let mut decoder = read::MultiGzDecoder::new(input_buf);
-            decoder.read_to_end(output_buf).map_err(|e| e.into())
+            match uncompress_size {
+                Some(size) => read_to_end_within(decoder, output_buf, size),
+                None => decoder.read_to_end(output_buf).map_err(|e| e.into()),
+            }
         }
 
         fn compress(&mut self, input_buf: &[u8], output_buf: &mut Vec<u8>) -> Result<()> {
@@ -362,7 +397,7 @@ mod brotli_codec {
 
     use std::io::{Read, Write};
 
-    use crate::compression::Codec;
+    use crate::compression::{Codec, read_to_end_within};
     use crate::errors::Result;
 
     use super::BrotliLevel;
@@ -389,10 +424,15 @@ mod brotli_codec {
             output_buf: &mut Vec<u8>,
             uncompress_size: Option<usize>,
         ) -> Result<usize> {
-            let buffer_size = uncompress_size.unwrap_or(BROTLI_DEFAULT_BUFFER_SIZE);
-            brotli::Decompressor::new(input_buf, buffer_size)
-                .read_to_end(output_buf)
-                .map_err(|e| e.into())
+            // The buffer holds input read from `input_buf`, so need be no larger than it
+            let buffer_size = uncompress_size
+                .unwrap_or(BROTLI_DEFAULT_BUFFER_SIZE)
+                .min(input_buf.len());
+            let mut decoder = brotli::Decompressor::new(input_buf, buffer_size);
+            match uncompress_size {
+                Some(size) => read_to_end_within(decoder, output_buf, size),
+                None => decoder.read_to_end(output_buf).map_err(|e| e.into()),
+            }
         }
 
         fn compress(&mut self, input_buf: &[u8], output_buf: &mut Vec<u8>) -> Result<()> {
@@ -463,7 +503,7 @@ mod lz4_codec {
             &mut self,
             input_buf: &[u8],
             output_buf: &mut Vec<u8>,
-            _uncompress_size: Option<usize>,
+            uncompress_size: Option<usize>,
         ) -> Result<usize> {
             let mut decoder = lz4_flex::frame::FrameDecoder::new(input_buf);
             let mut buffer: [u8; LZ4_BUFFER_SIZE] = [0; LZ4_BUFFER_SIZE];
@@ -474,6 +514,14 @@ mod lz4_codec {
                     break;
                 }
                 total_len += len;
+                if let Some(size) = uncompress_size {
+                    if total_len > size {
+                        return Err(general_err!(
+                            "LZ4 frame holds more than the {} bytes expected",
+                            size
+                        ));
+                    }
+                }
                 output_buf.write_all(&buffer[0..len])?;
             }
             Ok(total_len)
@@ -505,6 +553,7 @@ pub use lz4_codec::*;
 mod zstd_codec {
     use crate::compression::{Codec, ZstdLevel};
     use crate::errors::Result;
+    use crate::util::try_reserve_exact;
     use std::io::Cursor;
 
     /// Codec for Zstandard compression algorithm.
@@ -545,7 +594,7 @@ mod zstd_codec {
                         .map(|size| size as usize)
                 })
                 .unwrap_or(input_buf.len().saturating_mul(4));
-            output_buf.reserve(len);
+            try_reserve_exact(output_buf, len, "bytes to decompress into")?;
 
             let mut cursor = Cursor::new(output_buf);
             cursor.set_position(offset as u64);
@@ -606,6 +655,7 @@ mod lz4_raw_codec {
     use crate::compression::Codec;
     use crate::errors::ParquetError;
     use crate::errors::Result;
+    use crate::util::try_reserve_exact;
 
     /// Codec for LZ4 Raw compression algorithm.
     pub struct LZ4RawCodec {}
@@ -633,6 +683,7 @@ mod lz4_raw_codec {
                     ));
                 }
             };
+            try_reserve_exact(output_buf, required_len, "bytes to decompress into")?;
             output_buf.resize(offset + required_len, 0);
             match lz4_flex::block::decompress_into(input_buf, &mut output_buf[offset..]) {
                 Ok(n) => {
@@ -670,6 +721,7 @@ mod lz4_hadoop_codec {
     use crate::compression::lz4_codec::LZ4Codec;
     use crate::compression::lz4_raw_codec::LZ4RawCodec;
     use crate::errors::{ParquetError, Result};
+    use crate::util::try_reserve_exact;
     use std::io;
 
     /// Size of u32 type.
@@ -772,6 +824,7 @@ mod lz4_hadoop_codec {
                     ));
                 }
             };
+            try_reserve_exact(output_buf, required_len, "bytes to decompress into")?;
             output_buf.resize(output_len + required_len, 0);
             match try_decompress_hadoop(input_buf, &mut output_buf[output_len..]) {
                 Ok(n) => {

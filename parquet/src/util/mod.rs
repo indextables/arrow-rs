@@ -29,3 +29,16 @@ pub mod utf8;
 pub use self::test_common::page_util::{
     DataPageBuilder, DataPageBuilderImpl, InMemoryPageIterator,
 };
+
+use crate::errors::{ParquetError, Result};
+
+/// Reserves capacity for exactly `additional` more elements in `vec`, where `additional`
+/// is a size or count read from the file being decoded.
+///
+/// A size that cannot be allocated returns an error naming `what` rather than aborting the
+/// process, as [`Vec::reserve_exact`] would.
+pub(crate) fn try_reserve_exact<T>(vec: &mut Vec<T>, additional: usize, what: &str) -> Result<()> {
+    vec.try_reserve_exact(additional).map_err(|e| {
+        ParquetError::General(format!("cannot allocate {additional} {what}: {e}"))
+    })
+}
