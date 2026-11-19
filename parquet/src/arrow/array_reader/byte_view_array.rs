@@ -250,10 +250,10 @@ impl ByteViewArrayDecoder {
                 )?)
             }
             Encoding::DELTA_LENGTH_BYTE_ARRAY => ByteViewArrayDecoder::DeltaLength(
-                ByteViewArrayDecoderDeltaLength::new(data, validate_utf8)?,
+                ByteViewArrayDecoderDeltaLength::new(data, num_levels, num_values, validate_utf8)?,
             ),
             Encoding::DELTA_BYTE_ARRAY => ByteViewArrayDecoder::DeltaByteArray(
-                ByteViewArrayDecoderDelta::new(data, validate_utf8)?,
+                ByteViewArrayDecoderDelta::new(data, num_levels, num_values, validate_utf8)?,
             ),
             _ => {
                 return Err(general_err!(
@@ -578,10 +578,16 @@ pub struct ByteViewArrayDecoderDeltaLength {
 }
 
 impl ByteViewArrayDecoderDeltaLength {
-    fn new(data: Bytes, validate_utf8: bool) -> Result<Self> {
+    fn new(
+        data: Bytes,
+        num_levels: usize,
+        num_values: Option<usize>,
+        validate_utf8: bool,
+    ) -> Result<Self> {
+        let num_values = num_values.unwrap_or(num_levels);
         let mut len_decoder = DeltaBitPackDecoder::<Int32Type>::new();
-        len_decoder.set_data(data.clone(), 0)?;
-        let values = len_decoder.values_left();
+        len_decoder.set_data(data.clone(), num_values)?;
+        let values = len_decoder.checked_values_left(num_values)?;
 
         let mut lengths = vec![0; values];
         len_decoder.get(&mut lengths)?;
@@ -669,9 +675,14 @@ pub struct ByteViewArrayDecoderDelta {
 }
 
 impl ByteViewArrayDecoderDelta {
-    fn new(data: Bytes, validate_utf8: bool) -> Result<Self> {
+    fn new(
+        data: Bytes,
+        num_levels: usize,
+        num_values: Option<usize>,
+        validate_utf8: bool,
+    ) -> Result<Self> {
         Ok(Self {
-            decoder: DeltaByteArrayDecoder::new(data)?,
+            decoder: DeltaByteArrayDecoder::new(data, num_values.unwrap_or(num_levels))?,
             validate_utf8,
         })
     }

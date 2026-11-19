@@ -593,6 +593,43 @@ where
         }
     }
 
+    /// Returns the number of values declared by the header of this stream, after checking
+    /// that it is at most `max_values` and at most the number of values the remaining
+    /// bytes could encode.
+    ///
+    /// The count is read from the page and is otherwise unchecked, so callers that size
+    /// an allocation from it should use this rather than [`Decoder::values_left`].
+    pub(crate) fn checked_values_left(&self, max_values: usize) -> Result<usize> {
+        assert!(self.initialized, "Bit reader is not initialized");
+        let values = self.values_left;
+        if values > max_values {
+            return Err(general_err!(
+                "DELTA_BINARY_PACKED header declares {} values, but the page has at most {}",
+                values,
+                max_values
+            ));
+        }
+
+        // Each block after the first value carries its min delta (at least one byte)
+        // and one bit width byte per mini block
+        let blocks = match (values.saturating_sub(1), self.block_size) {
+            (0, _) => 0,
+            (_, 0) => return Err(general_err!("'block_size' must not be zero")),
+            (rest, block_size) => rest.div_ceil(block_size),
+        };
+        let min_bytes = blocks.saturating_mul(self.mini_blocks_per_block.saturating_add(1));
+        let bytes_left = self.bit_reader.bytes_left();
+        if min_bytes > bytes_left {
+            return Err(eof_err!(
+                "DELTA_BINARY_PACKED header declares {} values, which need at least {} bytes, but {} remain",
+                values,
+                min_bytes,
+                bytes_left
+            ));
+        }
+        Ok(values)
+    }
+
     /// Initializes the next block and the first mini block within it
     #[inline]
     fn next_block(&mut self) -> Result<()> {
@@ -982,7 +1019,7 @@ impl<T: DataType> Decoder<T> for DeltaLengthByteArrayDecoder<T> {
             Type::BYTE_ARRAY => {
                 let mut len_decoder = DeltaBitPackDecoder::<Int32Type>::new();
                 len_decoder.set_data(data.clone(), num_values)?;
-                let num_lengths = len_decoder.values_left();
+                let num_lengths = len_decoder.checked_values_left(num_values)?;
                 self.lengths.resize(num_lengths, 0);
                 len_decoder.get(&mut self.lengths[..])?;
 
@@ -1113,7 +1150,7 @@ impl<T: DataType> Decoder<T> for DeltaByteArrayDecoder<T> {
             Type::BYTE_ARRAY | Type::FIXED_LEN_BYTE_ARRAY => {
                 let mut prefix_len_decoder = DeltaBitPackDecoder::<Int32Type>::new();
                 prefix_len_decoder.set_data(data.clone(), num_values)?;
-                let num_prefixes = prefix_len_decoder.values_left();
+                let num_prefixes = prefix_len_decoder.checked_values_left(num_values)?;
                 self.prefix_lengths.resize(num_prefixes, 0);
                 prefix_len_decoder.get(&mut self.prefix_lengths[..])?;
 

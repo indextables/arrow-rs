@@ -441,7 +441,7 @@ impl ColumnValueDecoder for ValueDecoder {
                 decoder: DictIndexDecoder::new(data, num_levels, num_values)?,
             },
             Encoding::DELTA_BYTE_ARRAY => Decoder::Delta {
-                decoder: DeltaByteArrayDecoder::new(data)?,
+                decoder: DeltaByteArrayDecoder::new(data, num_values.unwrap_or(num_levels))?,
             },
             Encoding::BYTE_STREAM_SPLIT => Decoder::ByteStreamSplit {
                 buf: data,
