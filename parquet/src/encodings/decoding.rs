@@ -1357,13 +1357,22 @@ mod tests {
         }
 
         // Conforming pages holding more values than the page's value count
-        let input = vec![ByteArray::from("a"), ByteArray::from("ab"), ByteArray::from("b")];
-        for encoding in [Encoding::DELTA_LENGTH_BYTE_ARRAY, Encoding::DELTA_BYTE_ARRAY] {
+        let input = vec![
+            ByteArray::from("a"),
+            ByteArray::from("ab"),
+            ByteArray::from("b"),
+        ];
+        for encoding in [
+            Encoding::DELTA_LENGTH_BYTE_ARRAY,
+            Encoding::DELTA_BYTE_ARRAY,
+        ] {
             let col_descr = create_test_col_desc_ptr(-1, Type::BYTE_ARRAY);
             let mut encoder = get_encoder::<ByteArrayType>(encoding, &col_descr).unwrap();
             encoder.put(&input).unwrap();
             let encoded = encoder.flush_buffer().unwrap();
-            for err in delta_set_data_errors(encoded, 2, encoding == Encoding::DELTA_LENGTH_BYTE_ARRAY) {
+            for err in
+                delta_set_data_errors(encoded, 2, encoding == Encoding::DELTA_LENGTH_BYTE_ARRAY)
+            {
                 assert!(err.contains("but the page has at most 2"), "{err}");
             }
         }

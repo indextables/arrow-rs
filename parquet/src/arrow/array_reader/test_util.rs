@@ -59,8 +59,8 @@ pub fn encode_byte_array(encoding: Encoding, data: &[ByteArray]) -> Bytes {
 pub fn delta_pages_declaring(count: u64, num_values: usize) -> Vec<(Encoding, Bytes)> {
     let declaring = delta_binary_packed_header(count);
 
-    let mut lengths = get_encoder::<Int32Type>(Encoding::DELTA_BINARY_PACKED, &int32_column())
-        .unwrap();
+    let mut lengths =
+        get_encoder::<Int32Type>(Encoding::DELTA_BINARY_PACKED, &int32_column()).unwrap();
     lengths.put(&vec![0; num_values]).unwrap();
     let lengths = lengths.flush_buffer().unwrap();
 

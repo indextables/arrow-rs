@@ -589,13 +589,13 @@ mod tests {
     use super::*;
     use crate::arrow::ArrowWriter;
     use crate::arrow::array_reader::test_util::delta_pages_declaring;
+    use crate::arrow::arrow_reader::ParquetRecordBatchReader;
     use crate::basic::Type as PhysicalType;
     use crate::file::properties::{WriterProperties, WriterVersion};
     use crate::schema::types::{ColumnDescriptor, ColumnPath, Type as SchemaType};
-    use arrow_array::FixedSizeBinaryArray;
-    use crate::arrow::arrow_reader::ParquetRecordBatchReader;
     use arrow::datatypes::Field;
     use arrow::error::Result as ArrowResult;
+    use arrow_array::FixedSizeBinaryArray;
     use arrow_array::{Array, ListArray};
     use arrow_array::{Decimal256Array, RecordBatch};
     use bytes::Bytes;
@@ -634,7 +634,10 @@ mod tests {
                 }
                 let mut decoder = ValueDecoder::new(&column_desc);
                 let err = decoder.set_data(encoding, page, 4, Some(4)).unwrap_err();
-                assert!(err.to_string().contains("but the page has at most 4"), "{err}");
+                assert!(
+                    err.to_string().contains("but the page has at most 4"),
+                    "{err}"
+                );
             }
         }
 
@@ -656,8 +659,7 @@ mod tests {
             2,
         )
         .unwrap();
-        let written =
-            RecordBatch::try_from_iter([("col", Arc::new(values) as ArrayRef)]).unwrap();
+        let written = RecordBatch::try_from_iter([("col", Arc::new(values) as ArrayRef)]).unwrap();
 
         for version in [WriterVersion::PARQUET_1_0, WriterVersion::PARQUET_2_0] {
             let props = WriterProperties::builder()
