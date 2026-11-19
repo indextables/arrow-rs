@@ -1208,6 +1208,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::schema::types::{ColumnDescPtr, ColumnDescriptor, ColumnPath, Type as SchemaType};
+    use crate::util::bit_util::BitWriter;
     use crate::util::test_common::rand_gen::RandGen;
 
     #[test]
@@ -1263,6 +1264,72 @@ mod tests {
             "{}",
             err
         );
+    }
+
+    /// Returns a DELTA_BINARY_PACKED header declaring `count` values, with no blocks
+    fn delta_binary_packed_header(count: u64) -> Bytes {
+        let mut writer = BitWriter::new(32);
+        writer.put_vlq_int(128); // block size
+        writer.put_vlq_int(4); // mini blocks per block
+        writer.put_vlq_int(count);
+        writer.put_zigzag_vlq_int(0); // first value
+        writer.consume().into()
+    }
+
+    /// Returns the error from setting `data` holding at most `num_values` values on the
+    /// DELTA_LENGTH_BYTE_ARRAY and DELTA_BYTE_ARRAY decoders that accept it
+    fn delta_set_data_errors(data: Bytes, num_values: usize, length_only: bool) -> Vec<String> {
+        let mut errors = vec![];
+        if length_only {
+            let mut decoder = DeltaLengthByteArrayDecoder::<ByteArrayType>::new();
+            errors.push(decoder.set_data(data.clone(), num_values).unwrap_err());
+        }
+        let mut decoder = DeltaByteArrayDecoder::<ByteArrayType>::new();
+        errors.push(decoder.set_data(data.clone(), num_values).unwrap_err());
+        let mut decoder = DeltaByteArrayDecoder::<FixedLenByteArrayType>::new();
+        errors.push(decoder.set_data(data, num_values).unwrap_err());
+        errors.into_iter().map(|e| e.to_string()).collect()
+    }
+
+    #[test]
+    fn test_delta_length_count_exceeds_num_values() {
+        let mut zeros = get_encoder::<Int32Type>(
+            Encoding::DELTA_BINARY_PACKED,
+            &create_test_col_desc_ptr(-1, Type::INT32),
+        )
+        .unwrap();
+        zeros.put(&[0; 4]).unwrap();
+        let zeros = zeros.flush_buffer().unwrap();
+
+        for count in [1 << 31, 1 << 60, 5] {
+            let declaring = delta_binary_packed_header(count);
+            // Lengths for DELTA_LENGTH_BYTE_ARRAY, prefix lengths for DELTA_BYTE_ARRAY
+            for err in delta_set_data_errors(declaring.clone(), 4, true) {
+                assert!(err.contains("but the page has at most 4"), "{err}");
+            }
+            // Suffix lengths for DELTA_BYTE_ARRAY
+            let suffix: Bytes = [zeros.clone(), declaring].concat().into();
+            for err in delta_set_data_errors(suffix, 4, false) {
+                assert!(err.contains("but the page has at most 4"), "{err}");
+            }
+        }
+
+        // A count the bytes could not encode
+        for err in delta_set_data_errors(delta_binary_packed_header(1000), 1000, true) {
+            assert!(err.contains("need at least"), "{err}");
+        }
+
+        // Conforming pages holding more values than the page's value count
+        let input = vec![ByteArray::from("a"), ByteArray::from("ab"), ByteArray::from("b")];
+        for encoding in [Encoding::DELTA_LENGTH_BYTE_ARRAY, Encoding::DELTA_BYTE_ARRAY] {
+            let col_descr = create_test_col_desc_ptr(-1, Type::BYTE_ARRAY);
+            let mut encoder = get_encoder::<ByteArrayType>(encoding, &col_descr).unwrap();
+            encoder.put(&input).unwrap();
+            let encoded = encoder.flush_buffer().unwrap();
+            for err in delta_set_data_errors(encoded, 2, encoding == Encoding::DELTA_LENGTH_BYTE_ARRAY) {
+                assert!(err.contains("but the page has at most 2"), "{err}");
+            }
+        }
     }
 
     #[test]

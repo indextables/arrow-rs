@@ -621,7 +621,10 @@ impl ByteArrayDecoderDictionary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::array_reader::test_util::{byte_array_all_encodings, utf8_column};
+    use crate::arrow::array_reader::test_util::{
+        byte_array_all_encodings, delta_pages_declaring, encode_byte_array, utf8_column,
+    };
+    use crate::data_type::ByteArray;
     use crate::arrow::record_reader::buffer::ValuesBuffer;
     use arrow_array::{Array, StringArray};
     use arrow_buffer::Buffer;
@@ -680,6 +683,44 @@ mod tests {
                     None,
                 ]
             );
+        }
+    }
+
+    #[test]
+    fn test_byte_array_decoder_delta_length_counts() {
+        let column_desc = utf8_column();
+
+        // Length streams declaring more values than the page holds
+        for count in [1 << 31, 1 << 60, 5] {
+            for (encoding, page) in delta_pages_declaring(count, 4) {
+                let mut decoder = ByteArrayColumnValueDecoder::<i32>::new(&column_desc);
+                let err = decoder.set_data(encoding, page, 4, Some(4)).unwrap_err();
+                assert!(err.to_string().contains("but the page has at most 4"), "{err}");
+            }
+        }
+
+        // A length stream declaring more values than its bytes could encode
+        for (encoding, page) in delta_pages_declaring(1000, 1000) {
+            let mut decoder = ByteArrayColumnValueDecoder::<i32>::new(&column_desc);
+            let err = decoder.set_data(encoding, page, 1000, None).unwrap_err();
+            assert!(err.to_string().contains("need at least"), "{err}");
+        }
+
+        let data: Vec<ByteArray> = vec!["hello".into(), "world".into(), "a".into(), "b".into()];
+        for encoding in [Encoding::DELTA_LENGTH_BYTE_ARRAY, Encoding::DELTA_BYTE_ARRAY] {
+            let page = encode_byte_array(encoding, &data);
+
+            // A page holding more values than its header declares
+            let mut decoder = ByteArrayColumnValueDecoder::<i32>::new(&column_desc);
+            let err = decoder.set_data(encoding, page.clone(), 3, Some(3)).unwrap_err();
+            assert!(err.to_string().contains("but the page has at most 3"), "{err}");
+
+            // A page whose levels count nulls the length streams do not
+            let mut output = OffsetBuffer::<i32>::with_capacity(0);
+            decoder.set_data(encoding, page, 6, None).unwrap();
+            assert_eq!(decoder.read(&mut output, 6).unwrap(), 4);
+            assert_eq!(output.values.as_slice(), "helloworldab".as_bytes());
+            assert_eq!(output.offsets.as_slice(), &[0, 5, 10, 11, 12]);
         }
     }
 
