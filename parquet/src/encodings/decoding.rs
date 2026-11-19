@@ -2468,6 +2468,19 @@ mod tests {
     }
 
     // Creates test column descriptor.
+    /// A dictionary declaring more values than can be allocated fails rather than aborting
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_dict_decoder_unallocatable_dictionary() {
+        let mut plain = PlainDecoder::<Int32Type>::new(0);
+        plain
+            .set_data(Bytes::from(vec![0; 4]), usize::MAX / 2)
+            .unwrap();
+        let mut dict = DictDecoder::<Int32Type>::new();
+        let err = dict.set_dict(Box::new(plain)).unwrap_err();
+        assert!(err.to_string().contains("cannot allocate"), "{err}");
+    }
+
     fn create_test_col_desc_ptr(type_len: i32, t: Type) -> ColumnDescPtr {
         let ty = SchemaType::primitive_type_builder("t", t)
             .with_length(type_len)

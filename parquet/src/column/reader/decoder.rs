@@ -490,8 +490,62 @@ impl RepetitionLevelDecoder for RepetitionLevelDecoderImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::basic::Type as PhysicalType;
+    use crate::data_type::{BoolType, ByteArrayType, FixedLenByteArrayType, Int64Type};
     use crate::encodings::rle::RleEncoder;
+    use crate::schema::types::{ColumnDescriptor, ColumnPath};
     use rand::{prelude::*, rng};
+    use std::sync::Arc;
+
+    fn column(physical_type: PhysicalType, length: i32) -> ColumnDescPtr {
+        let t = crate::schema::types::Type::primitive_type_builder("c", physical_type)
+            .with_length(length)
+            .build()
+            .unwrap();
+        Arc::new(ColumnDescriptor::new(
+            Arc::new(t),
+            0,
+            0,
+            ColumnPath::new(vec![]),
+        ))
+    }
+
+    /// A dictionary page declaring more values than its bytes can hold fails before the
+    /// dictionary is allocated; one whose values fit its bytes is read
+    #[test]
+    fn test_set_dict_values_exceed_page_bytes() {
+        fn set_dict<T: DataType>(descr: ColumnDescPtr, buf: &[u8], num_values: u32) -> Result<()> {
+            ColumnValueDecoderImpl::<T>::new(&descr).set_dict(
+                Bytes::copy_from_slice(buf),
+                num_values,
+                Encoding::PLAIN,
+                false,
+            )
+        }
+
+        let declared = i32::MAX as u32;
+        let byte_array = column(PhysicalType::BYTE_ARRAY, -1);
+        let err = set_dict::<ByteArrayType>(byte_array.clone(), &[0; 8], declared).unwrap_err();
+        assert!(err.to_string().contains("dictionary page"), "{err}");
+        set_dict::<ByteArrayType>(byte_array, &[0; 8], 2).unwrap();
+
+        let int64 = column(PhysicalType::INT64, -1);
+        let err = set_dict::<Int64Type>(int64.clone(), &[0; 16], declared).unwrap_err();
+        assert!(err.to_string().contains("dictionary page"), "{err}");
+        set_dict::<Int64Type>(int64.clone(), &[0; 16], 2).unwrap();
+        let err = set_dict::<Int64Type>(int64, &[0; 16], 3).unwrap_err();
+        assert!(err.to_string().contains("dictionary page"), "{err}");
+
+        let flba = column(PhysicalType::FIXED_LEN_BYTE_ARRAY, 4);
+        let err = set_dict::<FixedLenByteArrayType>(flba.clone(), &[0; 8], declared).unwrap_err();
+        assert!(err.to_string().contains("dictionary page"), "{err}");
+        set_dict::<FixedLenByteArrayType>(flba, &[0; 8], 2).unwrap();
+
+        let boolean = column(PhysicalType::BOOLEAN, -1);
+        let err = set_dict::<BoolType>(boolean.clone(), &[0; 1], declared).unwrap_err();
+        assert!(err.to_string().contains("dictionary page"), "{err}");
+        set_dict::<BoolType>(boolean, &[0; 1], 8).unwrap();
+    }
 
     #[test]
     fn test_skip_padding() {

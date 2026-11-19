@@ -792,6 +792,30 @@ mod tests {
 
     use super::*;
 
+    /// A PLAIN page or dictionary page declaring more values than can be allocated is read
+    /// without reserving for the declared count
+    #[test]
+    fn test_byte_view_array_plain_unallocatable_values() {
+        let buf = Bytes::from_static(b"\x04\x00\x00\x00abcd");
+        let mut decoder = ByteViewArrayDecoderPlain::new(
+            buf.clone(),
+            usize::MAX / 2,
+            Some(usize::MAX / 2),
+            false,
+        );
+        let mut output = ViewBuffer::default();
+        // The page holds one value, not the count it declares
+        let err = decoder.read(&mut output, usize::MAX).unwrap_err();
+        assert!(err.to_string().contains("eof decoding byte array"), "{err}");
+
+        let column_desc = utf8_column();
+        let mut decoder = ByteViewArrayColumnValueDecoder::new(&column_desc);
+        let err = decoder
+            .set_dict(buf, u32::MAX, Encoding::PLAIN, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("eof decoding byte array"), "{err}");
+    }
+
     #[test]
     fn test_byte_view_array_decoder_delta_length_counts() {
         let column_desc = utf8_column();

@@ -643,6 +643,24 @@ mod tests {
     use arrow_array::{Array, StringArray};
     use arrow_buffer::Buffer;
 
+    /// A PLAIN page or dictionary page declaring more values than can be allocated is read
+    /// without reserving for the declared count
+    #[test]
+    fn test_byte_array_plain_unallocatable_values() {
+        let buf = Bytes::from_static(b"\x04\x00\x00\x00abcd");
+        let mut decoder =
+            ByteArrayDecoderPlain::new(buf.clone(), usize::MAX / 2, Some(usize::MAX / 2), false);
+        let mut output = OffsetBuffer::<i64>::with_capacity(0);
+        assert_eq!(decoder.read(&mut output, usize::MAX).unwrap(), 1);
+        assert_eq!(output.values.as_slice(), b"abcd");
+
+        let column_desc = utf8_column();
+        let mut decoder = ByteArrayColumnValueDecoder::<i64>::new(&column_desc);
+        decoder
+            .set_dict(buf, u32::MAX, Encoding::PLAIN, false)
+            .unwrap();
+    }
+
     #[test]
     fn test_byte_array_decoder() {
         let (pages, encoded_dictionary) =
