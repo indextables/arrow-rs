@@ -1383,6 +1383,30 @@ pub(crate) mod tests {
         assert!(failed, "the malformed page header must fail");
     }
 
+    /// Binary data declaring a length that cannot be allocated fails rather than aborting,
+    /// as do page header statistics declaring one
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn test_read_bytes_owned_unallocatable_length() {
+        use crate::file::metadata::thrift::PageHeader;
+        // varint 2^62
+        let length = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40];
+
+        let mut prot = ThriftReadInputProtocol::new(std::io::Cursor::new(length.to_vec()));
+        assert!(prot.read_bytes_owned().is_err());
+
+        // A DATA_PAGE header whose statistics' max is `length` bytes long
+        let mut data = vec![0x15, 0x00, 0x15, 0x14, 0x15, 0x14, 0x2C];
+        data.extend_from_slice(&[0x15, 0x02, 0x15, 0x00, 0x15, 0x00, 0x15, 0x00, 0x1C, 0x18]);
+        data.extend_from_slice(&length);
+        let mut prot = ThriftReadInputProtocol::new(std::io::Cursor::new(data));
+        assert!(PageHeader::read_thrift(&mut prot).is_err());
+
+        // Binary data shorter than its declared length fails
+        let mut prot = ThriftReadInputProtocol::new(std::io::Cursor::new(vec![0x04, 1, 2]));
+        assert!(prot.read_bytes_owned().is_err());
+    }
+
     #[test]
     fn test_read_thrift_vec_huge_declared_size_returns_err() {
         // Compact list header: 0xF5 = I32 elements, size follows as a varint.
