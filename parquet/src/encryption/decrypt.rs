@@ -665,3 +665,19 @@ impl FileDecryptor {
         &self.file_aad
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A module declaring more ciphertext than its input holds fails, without the declared
+    /// length being allocated first
+    #[test]
+    fn test_read_and_decrypt_declared_length_exceeds_input() {
+        let decryptor: Arc<dyn BlockDecryptor> =
+            Arc::new(RingGcmBlockDecryptor::new(&[0; 16]).unwrap());
+        let mut input = std::io::Cursor::new(vec![0xFF, 0xFF, 0xFF, 0xFF, 1, 2, 3]);
+        let err = read_and_decrypt(&decryptor, &mut input, b"").unwrap_err();
+        assert!(err.to_string().contains("EOF"), "{err}");
+    }
+}
