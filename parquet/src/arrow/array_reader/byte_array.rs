@@ -379,9 +379,11 @@ impl ByteArrayDecoderPlain {
         let initial_values_length = output.values.len();
 
         let to_read = len.min(self.max_remaining_values);
-        output.offsets.reserve(to_read);
-
         let remaining_bytes = self.buf.len() - self.offset;
+        // Each value takes at least the 4 bytes of its length, so the remaining bytes bound
+        // the values to reserve for, whatever count the page declares
+        output.offsets.reserve(to_read.min(remaining_bytes / 4));
+
         if remaining_bytes == 0 {
             return Ok(0);
         }

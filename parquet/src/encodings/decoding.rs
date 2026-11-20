@@ -32,6 +32,7 @@ use crate::encodings::decoding::byte_stream_split_decoder::{
 use crate::errors::{ParquetError, Result};
 use crate::schema::types::ColumnDescPtr;
 use crate::util::bit_util::{self, BitReader, FromBitpacked};
+use crate::util::try_reserve_exact;
 
 mod byte_stream_split_decoder;
 
@@ -369,8 +370,13 @@ impl<T: DataType> DictDecoder<T> {
     }
 
     /// Decodes and sets values for dictionary using `decoder` decoder.
+    ///
+    /// Returns an error if the values `decoder` declares cannot be allocated.
     pub fn set_dict(&mut self, mut decoder: Box<dyn Decoder<T>>) -> Result<()> {
         let num_values = decoder.values_left();
+        if let Some(additional) = num_values.checked_sub(self.dictionary.len()) {
+            try_reserve_exact(&mut self.dictionary, additional, "dictionary values")?;
+        }
         self.dictionary.resize(num_values, T::T::default());
         let _ = decoder.get(&mut self.dictionary)?;
         self.has_dictionary = true;

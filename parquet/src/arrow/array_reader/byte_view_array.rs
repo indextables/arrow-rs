@@ -177,7 +177,8 @@ impl ColumnValueDecoder for ByteViewArrayColumnValueDecoder {
         }
 
         let num_values = num_values as usize;
-        let mut buffer = ViewBuffer::with_capacity(num_values);
+        // Each value takes at least the 4 bytes of its length
+        let mut buffer = ViewBuffer::with_capacity(num_values.min(buf.len() / 4));
         let mut decoder =
             ByteViewArrayDecoderPlain::new(buf, num_values, Some(num_values), self.validate_utf8);
         decoder.read(&mut buffer, usize::MAX)?;
@@ -357,10 +358,14 @@ impl ByteViewArrayDecoderPlain {
         let mut end_offset = self.offset;
         let mut utf8_validation_begin = end_offset;
 
-        output.views.reserve(to_read);
+        // Each value takes at least the 4 bytes of its length, and the loop below returns
+        // before writing a view whose length it cannot read, so it writes at most this many
+        // views, whatever count the page declares
+        let max_views = to_read.min(buf_len.saturating_sub(self.offset) / 4);
+        output.views.reserve(max_views);
 
         // Safety: we reserved enough space in output.views
-        // and we will only write up to to_read views / track how many views we wrote.
+        // and we will only write up to max_views views / track how many views we wrote.
         // Ideally, we would use `Vec::extend` here, but this generates sub-optimal code.
         let views_ptr = output.views.as_mut_ptr().wrapping_add(output.views.len());
         for i in 0..to_read {

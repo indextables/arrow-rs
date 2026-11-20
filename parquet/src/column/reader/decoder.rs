@@ -17,7 +17,7 @@
 
 use bytes::Bytes;
 
-use crate::basic::{Encoding, EncodingMask};
+use crate::basic::{Encoding, EncodingMask, Type as PhysicalType};
 use crate::data_type::DataType;
 use crate::encodings::{
     decoding::{Decoder, DictDecoder, PlainDecoder, get_decoder},
@@ -140,6 +140,33 @@ pub trait ColumnValueDecoder {
 /// hot decoding paths.
 const ENCODING_SLOTS: usize = Encoding::MAX_DISCRIMINANT as usize + 1;
 
+/// Returns an error if a dictionary page of `len` bytes, whose values are PLAIN encoded,
+/// declares more values than those bytes can hold, so that the dictionary is not sized by a
+/// count its page cannot back.
+fn check_dictionary_values(descr: &ColumnDescPtr, len: usize, num_values: u32) -> Result<()> {
+    // The fewest bits a PLAIN value of the column's type takes; a BYTE_ARRAY value takes at
+    // least its 4-byte length
+    let value_bits = match descr.physical_type() {
+        PhysicalType::BOOLEAN => 1,
+        PhysicalType::INT32 | PhysicalType::FLOAT | PhysicalType::BYTE_ARRAY => 32,
+        PhysicalType::INT64 | PhysicalType::DOUBLE => 64,
+        PhysicalType::INT96 => 96,
+        PhysicalType::FIXED_LEN_BYTE_ARRAY => match usize::try_from(descr.type_length()) {
+            Ok(type_length) if type_length > 0 => type_length.saturating_mul(8),
+            _ => return Ok(()),
+        },
+    };
+    let bits = (num_values as usize).saturating_mul(value_bits);
+    if bits > len.saturating_mul(8) {
+        return Err(general_err!(
+            "dictionary page declares {} values, more than its {} bytes can hold",
+            num_values,
+            len
+        ));
+    }
+    Ok(())
+}
+
 /// An implementation of [`ColumnValueDecoder`] for `[T::T]`
 pub struct ColumnValueDecoderImpl<T: DataType> {
     descr: ColumnDescPtr,
@@ -180,6 +207,7 @@ impl<T: DataType> ColumnValueDecoder for ColumnValueDecoderImpl<T> {
         }
 
         if encoding == Encoding::RLE_DICTIONARY {
+            check_dictionary_values(&self.descr, buf.len(), num_values)?;
             let mut dictionary = PlainDecoder::<T>::new(self.descr.type_length());
             dictionary.set_data(buf, num_values as usize)?;
 
@@ -490,7 +518,6 @@ impl RepetitionLevelDecoder for RepetitionLevelDecoderImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::basic::Type as PhysicalType;
     use crate::data_type::{BoolType, ByteArrayType, FixedLenByteArrayType, Int64Type};
     use crate::encodings::rle::RleEncoder;
     use crate::schema::types::{ColumnDescriptor, ColumnPath};
