@@ -22,6 +22,7 @@ use crate::encryption::modules::{ModuleType, create_footer_aad, create_module_aa
 use crate::errors::{ParquetError, Result};
 use crate::file::column_crypto_metadata::ColumnCryptoMetaData;
 use crate::file::metadata::HeapSize;
+use crate::util::try_reserve_exact;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Formatter;
@@ -113,8 +114,21 @@ pub(crate) fn read_and_decrypt<T: Read>(
     let mut len_bytes = [0; 4];
     input.read_exact(&mut len_bytes)?;
     let ciphertext_len = u32::from_le_bytes(len_bytes) as usize;
-    let mut ciphertext = vec![0; 4 + ciphertext_len];
-    input.read_exact(&mut ciphertext[4..])?;
+    // The length is read from the input: reserve it fallibly, and fill only what the input holds
+    let mut ciphertext = Vec::new();
+    try_reserve_exact(&mut ciphertext, 4 + ciphertext_len, "ciphertext bytes")?;
+    ciphertext.extend_from_slice(&[0; 4]);
+    let read = input
+        .by_ref()
+        .take(ciphertext_len as u64)
+        .read_to_end(&mut ciphertext)?;
+    if read != ciphertext_len {
+        return Err(eof_err!(
+            "Expected {} bytes of ciphertext, read only {}",
+            ciphertext_len,
+            read
+        ));
+    }
 
     decryptor.decrypt(&ciphertext, aad.as_ref())
 }
