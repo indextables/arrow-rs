@@ -672,8 +672,13 @@ impl<'a, R: Read> ThriftCompactInputProtocol<'a> for ThriftReadInputProtocol<R> 
 
     fn read_bytes_owned(&mut self) -> ThriftProtocolResult<Vec<u8>> {
         let len = self.read_vlq()? as usize;
-        let mut v = Vec::with_capacity(len);
-        std::io::copy(&mut self.reader.by_ref().take(len as u64), &mut v)?;
+        // The length is read from the input: grow the vector with the bytes actually read, as
+        // upstream does since apache/arrow-rs#12142
+        let mut v = Vec::with_capacity(len.min(8 * 1024));
+        let copied = std::io::copy(&mut self.reader.by_ref().take(len as u64), &mut v)?;
+        if copied != len as u64 {
+            return Err(ThriftProtocolError::Eof);
+        }
         Ok(v)
     }
 
