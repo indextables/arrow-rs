@@ -445,8 +445,10 @@ pub(crate) fn decode_page(
                 return Err(general_err!("Invalid page header"));
             }
             let decompressed_size = uncompressed_page_size - offset;
+            // The codec reserves the decompressed bytes, fallibly, once it has checked what it
+            // can of its stream against the declared size
             let mut decompressed = Vec::new();
-            try_reserve_exact(&mut decompressed, uncompressed_page_size, "page bytes")?;
+            try_reserve_exact(&mut decompressed, offset, "page level bytes")?;
             decompressed.extend_from_slice(&buffer[..offset]);
             // decompressed size of zero corresponds to a page with no non-null values
             // see https://github.com/apache/parquet-format/blob/master/README.md#data-pages

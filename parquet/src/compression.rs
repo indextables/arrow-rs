@@ -198,8 +198,9 @@ pub fn create_codec(codec: CodecType, _options: &CodecOptions) -> Result<Option<
 }
 
 /// Reads `decoder` to its end, appending to `output_buf`, for a page declaring `size`
-/// uncompressed bytes: stops after one byte more and returns an error, so that a stream
-/// holding more than the page declares is not decompressed in full.
+/// uncompressed bytes: reserves `size` bytes fallibly, and stops after one byte more and
+/// returns an error, so that a stream holding more than the page declares is not
+/// decompressed in full.
 #[cfg(any(feature = "flate2", feature = "brotli", test))]
 fn read_to_end_within(
     decoder: impl std::io::Read,
@@ -207,6 +208,7 @@ fn read_to_end_within(
     size: usize,
 ) -> Result<usize> {
     use std::io::Read;
+    crate::util::try_reserve_exact(output_buf, size, "bytes to decompress into")?;
     let limit = u64::try_from(size).unwrap_or(u64::MAX).saturating_add(1);
     let n = decoder.take(limit).read_to_end(output_buf)?;
     if n > size {
@@ -255,7 +257,7 @@ mod snappy_codec {
             if let Some(size) = uncompress_size {
                 if size != len {
                     return Err(general_err!(
-                        "Snappy stream holds {} bytes, expected {}",
+                        "Snappy stream decompresses to {} bytes, not the expected size {}",
                         len,
                         size
                     ));
@@ -485,6 +487,7 @@ mod lz4_codec {
 
     use crate::compression::Codec;
     use crate::errors::{ParquetError, Result};
+    use crate::util::try_reserve_exact;
 
     const LZ4_BUFFER_SIZE: usize = 4096;
 
@@ -505,6 +508,9 @@ mod lz4_codec {
             output_buf: &mut Vec<u8>,
             uncompress_size: Option<usize>,
         ) -> Result<usize> {
+            if let Some(size) = uncompress_size {
+                try_reserve_exact(output_buf, size, "bytes to decompress into")?;
+            }
             let mut decoder = lz4_flex::frame::FrameDecoder::new(input_buf);
             let mut buffer: [u8; LZ4_BUFFER_SIZE] = [0; LZ4_BUFFER_SIZE];
             let mut total_len = 0;
@@ -1054,11 +1060,10 @@ mod tests {
         let mut compressed = Vec::new();
         LZ4Codec::new().compress(b"parquet", &mut compressed).unwrap();
         let mut out = Vec::new();
-        let n = LZ4Codec::new()
+        let err = LZ4Codec::new()
             .decompress(&compressed, &mut out, Some(UNALLOCATABLE))
-            .unwrap();
-        assert_eq!(n, 7);
-        assert_eq!(out, b"parquet");
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot allocate"), "{err}");
     }
 
     /// A stream holding more bytes than the page declares fails, and is not decompressed
